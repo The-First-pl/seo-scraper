@@ -22,6 +22,8 @@ HTTP_HEADERS = {
 # Generic       | /sitemap.xml flat                                     | heuristic path filter
 
 _SHOPER_SITEMAP   = "/console/integration/execute/name/GoogleSitemap"
+# Shoper pagination pages: /slug/2, /slug/3 … — skip, keep only /slug (page 1)
+_SHOPER_PAGINATION_RE = re.compile(r"/\d+$")
 
 # Patterns that identify a URL as a product category page
 _WC_CATEGORY_RE   = re.compile(r"/(product-category|kategoria-produktu|product_cat)/")
@@ -48,6 +50,7 @@ def _normalize(raw: str, base_url: str) -> str | None:
 
 def _is_xml(r) -> bool:
     ct = r.headers.get("Content-Type", "")
+    # Shoper serves sitemaps as application/force-download — check content, not header
     return "xml" in ct or r.text.lstrip().startswith("<?xml")
 
 
@@ -101,19 +104,62 @@ def _try_woocommerce(base_url: str) -> list[str] | None:
 
 def _try_shoper(base_url: str) -> list[str] | None:
     """
-    Shoper: single flat sitemap at /console/integration/execute/name/GoogleSitemap.
-    Category URLs contain /c/ followed by slug (and optional /id).
+    Shoper: /console/integration/execute/name/GoogleSitemap returns a sitemap index
+    with separate sub-sitemaps for products, categories, producers, news, info.
+    The categories sub-sitemap contains two URL formats:
+      - /pl/c/CategoryName/ID  (with /c/ segment)
+      - /slug  +  /slug/2  /slug/3 …  (paginated category — keep only page 1 i.e. no trailing number)
     """
-    url = base_url + _SHOPER_SITEMAP
-    r = _get(url, timeout=12)
+    index_url = base_url + _SHOPER_SITEMAP
+    r = _get(index_url, timeout=12)
     if not r or not _is_xml(r):
         return None
 
+    soup = BeautifulSoup(r.text, "lxml-xml")
+    sub_sitemaps = soup.find_all("sitemap")
+
+    # Collect URLs from sub-sitemaps whose loc contains "categories"
+    # Fall back to scanning the index itself as a flat sitemap if no sub-sitemaps found.
+    cat_sitemap_urls: list[str] = []
+    if sub_sitemaps:
+        for sm in sub_sitemaps:
+            loc = sm.find("loc")
+            if loc and "categories" in loc.text:
+                cat_sitemap_urls.append(loc.text.strip())
+
+    # No sub-sitemaps or none matched "categories" — treat the response as flat
+    sources = cat_sitemap_urls if cat_sitemap_urls else [index_url]
+
     found: set[str] = set()
-    for raw in _extract_locs(r.text):
-        u = _normalize(raw, base_url)
-        if u and _SHOPER_CAT_RE.search(u):
-            found.add(u)
+    for src in sources:
+        resp = _get(src, timeout=12) if src != index_url else r
+        if not resp:
+            continue
+        for raw in _extract_locs(resp.text):
+            u = _normalize(raw, base_url)
+            if not u:
+                continue
+            # Format 1: /pl/c/Name/ID  or  /c/Name
+            # Skip pagination: /pl/c/Name/ID/2, /pl/c/Name/ID/3, …
+            # Pattern: after /c/Slug/ID there is an extra numeric page segment
+            if _SHOPER_CAT_RE.search(u):
+                # Find the segment after the numeric ID; if it's also numeric → pagination
+                parts = u.rstrip("/").split("/c/", 1)[-1].split("/")
+                # parts = ['Slug', 'ID'] or ['Slug', 'ID', '2']
+                is_paginated = len(parts) >= 3 and parts[2].isdigit()
+                if not is_paginated:
+                    found.add(u)
+                continue
+            # Format 2: /slug  (skip pagination pages /slug/2, /slug/3, …)
+            if not _SHOPER_PAGINATION_RE.search(u):
+                # Exclude obviously non-category paths
+                path = u.replace(base_url.replace("http://", "https://"), "")
+                skip = re.search(
+                    r"/(produkt|product|p/|news|blog|info|producent|producer|tag)/",
+                    path, re.IGNORECASE,
+                )
+                if not skip and path.count("/") == 1:  # top-level slug only
+                    found.add(u)
 
     return sorted(found) if found else None
 
