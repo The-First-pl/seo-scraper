@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Generowanie audytu{% endblock %}
+
+{% block head %}
+<style>
+  .log-box {
+    background: #0d1117; color: #58a6ff;
+    font-family: 'Courier New', monospace; font-size: .82rem;
+    height: 260px; overflow-y: auto;
+    border-radius: 8px; padding: 1rem;
+  }
+  .log-box .log-line { opacity: .7; }
+  .log-box .log-line:last-child { opacity: 1; color: #3fb950; }
+  .progress { height: 10px; border-radius: 99px; }
+  .progress-bar { transition: width .4s ease; }
+  #done-section { display: none; }
+  #error-section { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+<div class="col-md-8">
+
+  <h2 class="fw-bold mb-1" style="color:var(--brand-dark)">
+    <i class="bi bi-gear-wide-connected me-2"></i>Generowanie audytu
+  </h2>
+  <p class="text-muted mb-4">{{ task.shop_url }}</p>
+
+  <div class="card mb-4">
+    <div class="card-body p-4">
+
+      <!-- Progress bar -->
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <span id="status-msg" class="fw-semibold">{{ task.message }}</span>
+        <span id="pct-label" class="text-muted small">{{ task.progress }}%</span>
+      </div>
+      <div class="progress mb-4">
+        <div id="progress-bar"
+             class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
+             role="progressbar"
+             style="width: {{ task.progress }}%">
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="log-box" id="log-box">
+        {% for line in task.log %}
+        <div class="log-line">▶ {{ line }}</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Done -->
+  <div id="done-section" class="card border-success">
+    <div class="card-body p-4 text-center">
+      <div style="font-size:3rem">✅</div>
+      <h4 class="fw-bold mt-2 mb-1">Audyt gotowy!</h4>
+      <p class="text-muted mb-4" id="done-msg"></p>
+      <a href="/download/{{ task_id }}"
+         class="btn btn-success btn-lg px-5">
+        <i class="bi bi-file-earmark-excel-fill me-2"></i>Pobierz Excel
+      </a>
+      <a href="/dashboard" class="btn btn-outline-secondary btn-lg ms-2">
+        Nowy audyt
+      </a>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div id="error-section" class="card border-danger">
+    <div class="card-body p-4">
+      <h5 class="text-danger fw-bold"><i class="bi bi-x-circle-fill me-2"></i>Błąd</h5>
+      <p id="error-msg" class="mb-3"></p>
+      <a href="/dashboard" class="btn btn-outline-danger">Wróć i spróbuj ponownie</a>
+    </div>
+  </div>
+
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TASK_ID = "{{ task_id }}";
+let done = false;
+
+function scrollLog() {
+  const box = document.getElementById('log-box');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function poll() {
+  if (done) return;
+  try {
+    const res  = await fetch(`/api/status/${TASK_ID}`);
+    const data = await res.json();
+
+    // Update progress bar
+    document.getElementById('progress-bar').style.width = data.progress + '%';
+    document.getElementById('pct-label').textContent = data.progress + '%';
+    document.getElementById('status-msg').textContent = data.message;
+
+    // Update log
+    const box = document.getElementById('log-box');
+    box.innerHTML = (data.log || [])
+      .map(l => `<div class="log-line">▶ ${l}</div>`)
+      .join('');
+    scrollLog();
+
+    if (data.status === 'done') {
+      done = true;
+      document.getElementById('progress-bar').classList.remove('progress-bar-animated');
+      document.getElementById('done-msg').textContent = data.message;
+      document.getElementById('done-section').style.display = 'block';
+    } else if (data.status === 'error') {
+      done = true;
+      document.getElementById('progress-bar').classList.add('bg-danger');
+      document.getElementById('progress-bar').classList.remove('progress-bar-animated');
+      document.getElementById('error-msg').textContent = data.error || 'Nieznany błąd.';
+      document.getElementById('error-section').style.display = 'block';
+    }
+  } catch(e) {
+    console.warn('Poll error', e);
+  }
+
+  if (!done) setTimeout(poll, 1500);
+}
+
+// Start polling unless already finished
+{% if task.status == 'done' %}
+  document.getElementById('done-section').style.display = 'block';
+  document.getElementById('done-msg').textContent = "{{ task.message }}";
+{% elif task.status == 'error' %}
+  document.getElementById('error-section').style.display = 'block';
+  document.getElementById('error-msg').textContent = "{{ task.error }}";
+{% else %}
+  setTimeout(poll, 1500);
+{% endif %}
+
+scrollLog();
+</script>
+{% endblock %}

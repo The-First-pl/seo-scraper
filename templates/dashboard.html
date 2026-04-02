@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="fw-bold mb-1" style="color:var(--brand-dark)">
+  <i class="bi bi-speedometer2 me-2"></i>Konfiguracja audytu
+</h2>
+<p class="text-muted mb-4">Wybierz property GSC, podaj URL sklepu i wygeneruj audyt.</p>
+
+{% if gsc_error %}
+<div class="alert alert-warning d-flex align-items-start gap-2">
+  <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+  <div><strong>Problem z GSC:</strong> {{ gsc_error }}</div>
+</div>
+{% endif %}
+
+<form action="/generate" method="post">
+
+  <!-- URL sklepu -->
+  <div class="card mb-3">
+    <div class="card-header-brand">
+      <h6 class="mb-0"><i class="bi bi-globe2 me-2"></i>1. URL sklepu</h6>
+    </div>
+    <div class="card-body p-4">
+      <input
+        type="url"
+        name="shop_url"
+        class="form-control form-control-lg"
+        placeholder="https://kawa-amann.pl"
+        value="{{ shop_url }}"
+        required
+      >
+      <div class="form-text">Skrypt znajdzie kategorie produktów przez sitemap.xml</div>
+    </div>
+  </div>
+
+  <!-- GSC Property -->
+  <div class="card mb-3">
+    <div class="card-header-brand">
+      <h6 class="mb-0"><i class="bi bi-search me-2"></i>2. Google Search Console — property</h6>
+    </div>
+    <div class="card-body p-4">
+      {% if properties %}
+        <div class="list-group">
+          {% for prop in properties %}
+          <label class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3" style="cursor:pointer">
+            <input type="radio" name="site_url" value="{{ prop }}" class="form-check-input"
+              {% if loop.first %}checked{% endif %}>
+            <span>
+              <i class="bi bi-box-arrow-up-right me-1 text-muted"></i>
+              {{ prop }}
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="alert alert-secondary mb-0">
+          <i class="bi bi-info-circle me-2"></i>
+          Nie znaleziono żadnych property w GSC na tym koncie.
+          <a href="/auth/google" class="alert-link ms-1">Zaloguj się ponownie</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Anthropic API key -->
+  <div class="card mb-4">
+    <div class="card-header-brand">
+      <h6 class="mb-0"><i class="bi bi-key me-2"></i>3. Klucz Anthropic API</h6>
+    </div>
+    <div class="card-body p-4">
+      {% if api_key_set %}
+        <div class="alert alert-success mb-0 d-flex align-items-center gap-2">
+          <i class="bi bi-check-circle-fill"></i>
+          Klucz API jest ustawiony w zmiennych środowiskowych serwera.
+        </div>
+        <input type="hidden" name="api_key" value="">
+      {% else %}
+        <input
+          type="password"
+          name="api_key"
+          class="form-control form-control-lg"
+          placeholder="sk-ant-api03-..."
+          autocomplete="off"
+          required
+        >
+        <div class="form-text">Klucz nie jest zapisywany — używany tylko podczas tego audytu.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <button
+    type="submit"
+    class="btn btn-brand btn-lg w-100 py-3"
+    {% if not properties %}disabled{% endif %}
+  >
+    <i class="bi bi-play-circle-fill me-2"></i>Generuj audyt SEO
+  </button>
+</form>
+{% endblock %}

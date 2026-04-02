@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Błąd{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+<div class="col-md-6 text-center">
+  <div style="font-size:4rem">⚠️</div>
+  <h2 class="fw-bold mt-3 mb-2" style="color:var(--brand-dark)">Coś poszło nie tak</h2>
+  <p class="text-muted mb-4">{{ message }}</p>
+  <a href="/" class="btn btn-brand btn-lg">Wróć na stronę główną</a>
+</div>
+</div>
+{% endblock %}
