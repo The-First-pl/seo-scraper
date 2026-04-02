@@ -6,7 +6,8 @@
       "Bash(python3 scrape_categories.py)",
       "Bash(ls ~/Downloads/*.json)",
       "Bash(python3 -c \":*)",
-      "Bash(python3 -c \"import flask\")"
+      "Bash(python3 -c \"import flask\")",
+      "WebSearch"
     ]
   }
 }
