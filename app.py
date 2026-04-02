@@ -91,12 +91,20 @@ def auth_google():
         prompt="select_account consent",
     )
     session["oauth_state"] = state
+    # Persist PKCE code_verifier — Flow generates it during authorization_url()
+    # and needs the same value in fetch_token(); a new Flow instance won't have it.
+    session["oauth_code_verifier"] = getattr(flow, "code_verifier", None)
     return redirect(auth_url)
 
 
 @app.route("/auth/callback")
 def auth_callback():
     flow = _get_flow()
+    # Restore PKCE code_verifier so fetch_token can send it to Google's token endpoint.
+    # Without this, a freshly created Flow has no verifier and Google returns invalid_grant.
+    if session.get("oauth_code_verifier"):
+        flow.code_verifier = session.pop("oauth_code_verifier")
+
     # Ensure HTTPS in the authorization_response on Railway
     callback_url = request.url.replace("http://", "https://") \
         if APP_URL.startswith("https://") else request.url
