@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import uuid
 
@@ -14,6 +15,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from audit_runner import run_audit
 from gsc_client import list_properties
+from blog_planner import scrape_site_context, generate_blog_plan, export_excel
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -216,6 +218,92 @@ def download(task_id: str):
 
     domain = task["shop_url"].replace("https://", "").replace("http://", "").split("/")[0]
     filename = f"seo_audit_{domain}.xlsx"
+
+    return send_file(
+        task["result_path"],
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/blog-planner")
+def blog_planner():
+    api_key_set = bool(ANTHROPIC_API_KEY)
+    return render_template("blog_planner.html", api_key_set=api_key_set)
+
+
+@app.route("/blog-planner/generate", methods=["POST"])
+def blog_planner_generate():
+    shop_url  = request.form.get("shop_url", "").strip()
+    tematyka  = request.form.get("tematyka", "").strip()
+    jezyk     = request.form.get("jezyk", "Polski").strip()
+    liczba    = int(request.form.get("liczba_klastrow", 5))
+    api_key   = request.form.get("api_key", "").strip() or ANTHROPIC_API_KEY
+
+    if not tematyka:
+        return jsonify({"error": "Pole 'Tematyka bloga' jest wymagane."}), 400
+    if not api_key:
+        return jsonify({"error": "Podaj klucz Anthropic API."}), 400
+
+    task_id = uuid.uuid4().hex[:8]
+    _tasks[task_id] = {
+        "type":        "blog",
+        "status":      "running",
+        "progress":    0,
+        "message":     "Startowanie…",
+        "log":         [],
+        "result_path": None,
+        "error":       None,
+        "tematyka":    tematyka,
+    }
+
+    def _progress(pct: int, msg: str):
+        _tasks[task_id]["progress"] = pct
+        _tasks[task_id]["message"]  = msg
+        _tasks[task_id]["log"].append(msg)
+
+    def _worker():
+        try:
+            import anthropic as _anthropic
+
+            site_ctx = None
+            if shop_url:
+                _progress(10, f"Scrapuję dane strony: {shop_url}…")
+                try:
+                    site_ctx = scrape_site_context(shop_url)
+                    _progress(25, f"Pobrano dane strony (kategorii: {len(site_ctx.get('categories', []))}).")
+                except Exception as e:
+                    _progress(25, f"Scraping pominięty: {e}")
+
+            _progress(35, "Generuję plan bloga przez Claude API…")
+            client = _anthropic.Anthropic(api_key=api_key)
+            plan = generate_blog_plan(client, tematyka, jezyk, liczba, site_ctx)
+
+            total = sum(1 + len(c.get("supporting", [])) for c in plan.get("clusters", []))
+            _progress(80, f"Plan gotowy — {len(plan['clusters'])} klastrów, {total} wpisów. Generuję Excel…")
+
+            path = export_excel(plan, tematyka)
+            _tasks[task_id]["status"]      = "done"
+            _tasks[task_id]["result_path"] = path
+            _progress(100, f"Gotowe! {len(plan['clusters'])} klastrów, {total} wpisów łącznie.")
+        except Exception as e:
+            _tasks[task_id]["status"] = "error"
+            _tasks[task_id]["error"]  = str(e)
+            _tasks[task_id]["log"].append(f"BŁĄD: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
+@app.route("/blog-planner/download/<task_id>")
+def blog_planner_download(task_id: str):
+    task = _tasks.get(task_id)
+    if not task or task.get("type") != "blog" or task["status"] != "done":
+        return "Plik nie jest gotowy.", 404
+
+    slug = re.sub(r"[^\w]", "_", task.get("tematyka", "blog"))[:40]
+    filename = f"plan_bloga_{slug}.xlsx"
 
     return send_file(
         task["result_path"],

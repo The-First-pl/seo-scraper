@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+{% block title %}Blog Planner{% endblock %}
+
+{% block head %}
+<style>
+  .slider-val {
+    display: inline-block;
+    min-width: 2rem;
+    text-align: center;
+    font-weight: 700;
+    color: var(--brand-blue);
+  }
+  .log-box {
+    background: #0d1117; color: #58a6ff;
+    font-family: 'Courier New', monospace; font-size: .82rem;
+    height: 200px; overflow-y: auto;
+    border-radius: 8px; padding: 1rem;
+  }
+  .log-box .log-line { opacity: .7; }
+  .log-box .log-line:last-child { opacity: 1; color: #3fb950; }
+  .progress { height: 10px; border-radius: 99px; }
+  #generating-section { display: none; }
+  #done-section       { display: none; }
+  #error-section      { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+<div class="col-md-9">
+
+  <div class="text-center mb-4">
+    <div style="font-size:2.8rem">📝</div>
+    <h1 class="fw-bold" style="color:var(--brand-dark)">Blog Planner</h1>
+    <p class="text-muted">Zaplanuj blog SEO od zera — klastry tematyczne, pillar pages i wpisy wspierające.</p>
+  </div>
+
+  <!-- ── Form ─────────────────────────────────────────────────────────────── -->
+  <div id="form-section">
+    <div class="card mb-3">
+      <div class="card-header-brand">
+        <h6 class="mb-0"><i class="bi bi-globe2 me-2"></i>1. Strona (opcjonalnie)</h6>
+      </div>
+      <div class="card-body p-4">
+        <input type="url" id="shop_url" class="form-control form-control-lg"
+               placeholder="np. https://twoj-sklep.pl">
+        <div class="form-text">
+          Jeśli podasz URL, scraper pobierze tytuł, opis i kategorie — Claude uwzględni je w planie.
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header-brand">
+        <h6 class="mb-0"><i class="bi bi-chat-left-text me-2"></i>2. Tematyka bloga <span class="text-warning">*</span></h6>
+      </div>
+      <div class="card-body p-4">
+        <textarea id="tematyka" class="form-control" rows="3"
+                  placeholder="np. sklep z kawą specialty, klienci to baristas i home brewers, sprzedajemy ziarna i sprzęt do parzenia"
+                  required></textarea>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header-brand">
+            <h6 class="mb-0"><i class="bi bi-translate me-2"></i>3. Język</h6>
+          </div>
+          <div class="card-body p-4">
+            <select id="jezyk" class="form-select form-select-lg">
+              <option value="Polski" selected>🇵🇱 Polski</option>
+              <option value="English">🇬🇧 English</option>
+              <option value="Deutsch">🇩🇪 Deutsch</option>
+              <option value="Français">🇫🇷 Français</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header-brand">
+            <h6 class="mb-0">
+              <i class="bi bi-diagram-3 me-2"></i>4. Liczba klastrów:
+              <span id="slider-val" class="slider-val">5</span>
+            </h6>
+          </div>
+          <div class="card-body p-4 d-flex align-items-center gap-3">
+            <span class="text-muted small">3</span>
+            <input type="range" id="liczba_klastrow" class="form-range flex-grow-1"
+                   min="3" max="10" value="5">
+            <span class="text-muted small">10</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% if not api_key_set %}
+    <div class="card mb-3">
+      <div class="card-header-brand">
+        <h6 class="mb-0"><i class="bi bi-key me-2"></i>5. Klucz Anthropic API</h6>
+      </div>
+      <div class="card-body p-4">
+        <input type="password" id="api_key" class="form-control form-control-lg"
+               placeholder="sk-ant-api03-…" autocomplete="off">
+        <div class="form-text">Klucz nie jest zapisywany — używany tylko podczas tego generowania.</div>
+      </div>
+    </div>
+    {% else %}
+    <input type="hidden" id="api_key" value="">
+    {% endif %}
+
+    <button id="btn-generate" class="btn btn-brand btn-lg w-100 py-3">
+      <i class="bi bi-magic me-2"></i>Generuj plan bloga
+    </button>
+  </div>
+
+  <!-- ── Generating ───────────────────────────────────────────────────────── -->
+  <div id="generating-section" class="card">
+    <div class="card-body p-4">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <span id="gen-msg" class="fw-semibold">Startowanie…</span>
+        <span id="gen-pct" class="text-muted small">0%</span>
+      </div>
+      <div class="progress mb-4">
+        <div id="gen-bar" class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
+             role="progressbar" style="width:0%"></div>
+      </div>
+      <div class="log-box" id="log-box"></div>
+    </div>
+  </div>
+
+  <!-- ── Done ─────────────────────────────────────────────────────────────── -->
+  <div id="done-section" class="card border-success">
+    <div class="card-body p-4 text-center">
+      <div style="font-size:3rem">✅</div>
+      <h4 class="fw-bold mt-2 mb-1">Plan bloga gotowy!</h4>
+      <p class="text-muted mb-4" id="done-msg"></p>
+      <a id="btn-download" href="#" class="btn btn-success btn-lg px-5">
+        <i class="bi bi-file-earmark-excel-fill me-2"></i>Pobierz Excel
+      </a>
+      <button class="btn btn-outline-secondary btn-lg ms-2" onclick="resetForm()">
+        Nowy plan
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Error ─────────────────────────────────────────────────────────────── -->
+  <div id="error-section" class="card border-danger">
+    <div class="card-body p-4">
+      <h5 class="text-danger fw-bold"><i class="bi bi-x-circle-fill me-2"></i>Błąd</h5>
+      <p id="error-msg" class="mb-3"></p>
+      <button class="btn btn-outline-danger" onclick="resetForm()">Spróbuj ponownie</button>
+    </div>
+  </div>
+
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Slider label ──────────────────────────────────────────────────────────────
+const slider = document.getElementById('liczba_klastrow');
+const sliderVal = document.getElementById('slider-val');
+slider.addEventListener('input', () => sliderVal.textContent = slider.value);
+
+// ── Sections ─────────────────────────────────────────────────────────────────
+const $form       = document.getElementById('form-section');
+const $generating = document.getElementById('generating-section');
+const $done       = document.getElementById('done-section');
+const $error      = document.getElementById('error-section');
+
+function show(el)  { el.style.display = 'block'; }
+function hide(el)  { el.style.display = 'none';  }
+
+function resetForm() {
+  show($form);
+  hide($generating);
+  hide($done);
+  hide($error);
+  document.getElementById('gen-bar').style.width = '0%';
+  document.getElementById('log-box').innerHTML   = '';
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+let _pollTimer = null;
+
+function startPolling(taskId) {
+  clearInterval(_pollTimer);
+  _pollTimer = setInterval(async () => {
+    try {
+      const res  = await fetch(`/api/status/${taskId}`);
+      const data = await res.json();
+
+      document.getElementById('gen-bar').style.width = data.progress + '%';
+      document.getElementById('gen-pct').textContent = data.progress + '%';
+      document.getElementById('gen-msg').textContent = data.message;
+
+      const box = document.getElementById('log-box');
+      box.innerHTML = (data.log || [])
+        .map(l => `<div class="log-line">▶ ${l}</div>`).join('');
+      box.scrollTop = box.scrollHeight;
+
+      if (data.status === 'done') {
+        clearInterval(_pollTimer);
+        hide($generating);
+        show($done);
+        document.getElementById('done-msg').textContent  = data.message;
+        document.getElementById('btn-download').href     = `/blog-planner/download/${taskId}`;
+      } else if (data.status === 'error') {
+        clearInterval(_pollTimer);
+        hide($generating);
+        show($error);
+        document.getElementById('error-msg').textContent = data.error || 'Nieznany błąd.';
+      }
+    } catch(e) { console.warn('poll error', e); }
+  }, 1500);
+}
+
+// ── Submit ────────────────────────────────────────────────────────────────────
+document.getElementById('btn-generate').addEventListener('click', async () => {
+  const tematyka = document.getElementById('tematyka').value.trim();
+  if (!tematyka) {
+    alert('Uzupełnij pole Tematyka bloga.');
+    document.getElementById('tematyka').focus();
+    return;
+  }
+
+  const apiKey = document.getElementById('api_key').value.trim();
+  {% if not api_key_set %}
+  if (!apiKey) {
+    alert('Podaj klucz Anthropic API.');
+    document.getElementById('api_key').focus();
+    return;
+  }
+  {% endif %}
+
+  const body = new FormData();
+  body.append('shop_url',        document.getElementById('shop_url').value.trim());
+  body.append('tematyka',        tematyka);
+  body.append('jezyk',           document.getElementById('jezyk').value);
+  body.append('liczba_klastrow', slider.value);
+  body.append('api_key',         apiKey);
+
+  hide($form);
+  hide($done);
+  hide($error);
+  show($generating);
+
+  try {
+    const res  = await fetch('/blog-planner/generate', { method: 'POST', body });
+    const data = await res.json();
+    if (data.error) {
+      hide($generating);
+      show($error);
+      document.getElementById('error-msg').textContent = data.error;
+      return;
+    }
+    startPolling(data.task_id);
+  } catch(e) {
+    hide($generating);
+    show($error);
+    document.getElementById('error-msg').textContent = 'Błąd połączenia z serwerem.';
+  }
+});
+</script>
+{% endblock %}
