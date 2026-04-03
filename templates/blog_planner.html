@@ -3,13 +3,6 @@
 
 {% block head %}
 <style>
-  .slider-val {
-    display: inline-block;
-    min-width: 2rem;
-    text-align: center;
-    font-weight: 700;
-    color: var(--brand-blue);
-  }
   .log-box {
     background: #0d1117; color: #58a6ff;
     font-family: 'Courier New', monospace; font-size: .82rem;
@@ -32,73 +25,45 @@
   <div class="text-center mb-4">
     <div style="font-size:2.8rem">📝</div>
     <h1 class="fw-bold" style="color:var(--brand-dark)">Blog Planner</h1>
-    <p class="text-muted">Zaplanuj blog SEO od zera — klastry tematyczne, pillar pages i wpisy wspierające.</p>
+    <p class="text-muted">Wpisz frazy kategorii sklepu — system znajdzie pytania i tematy poradnikowe wokół nich.</p>
   </div>
 
   <!-- ── Form ─────────────────────────────────────────────────────────────── -->
   <div id="form-section">
-    <div class="card mb-3">
-      <div class="card-header-brand">
-        <h6 class="mb-0"><i class="bi bi-globe2 me-2"></i>1. Strona (opcjonalnie)</h6>
-      </div>
-      <div class="card-body p-4">
-        <input type="url" id="shop_url" class="form-control form-control-lg"
-               placeholder="np. https://twoj-sklep.pl">
-        <div class="form-text">
-          Jeśli podasz URL, scraper pobierze tytuł, opis i kategorie — Claude uwzględni je w planie.
-        </div>
-      </div>
-    </div>
 
     <div class="card mb-3">
       <div class="card-header-brand">
-        <h6 class="mb-0"><i class="bi bi-chat-left-text me-2"></i>2. Tematyka bloga <span class="text-warning">*</span></h6>
+        <h6 class="mb-0"><i class="bi bi-tags me-2"></i>1. Frazy kategorii sklepu <span class="text-warning">*</span></h6>
       </div>
       <div class="card-body p-4">
-        <textarea id="tematyka" class="form-control" rows="3"
-                  placeholder="np. sklep z kawą specialty, klienci to baristas i home brewers, sprzedajemy ziarna i sprzęt do parzenia"
+        <textarea id="frazy" class="form-control" rows="3"
+                  placeholder="np. kosiarki spalinowe, kosiarki elektryczne, kosiarki akumulatorowe"
                   required></textarea>
+        <div class="form-text mt-2">
+          Wpisz frazy swoich kategorii produktowych — system znajdzie tematy poradnikowe wokół nich.<br>
+          Oddzielaj frazy przecinkami. Dla każdej frazy zostanie wygenerowanych 3–5 pytań pillar z 4–6 frazami wspierającymi.
+        </div>
       </div>
     </div>
 
-    <div class="row g-3 mb-3">
-      <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-header-brand">
-            <h6 class="mb-0"><i class="bi bi-translate me-2"></i>3. Język</h6>
-          </div>
-          <div class="card-body p-4">
-            <select id="jezyk" class="form-select form-select-lg">
-              <option value="Polski" selected>🇵🇱 Polski</option>
-              <option value="English">🇬🇧 English</option>
-              <option value="Deutsch">🇩🇪 Deutsch</option>
-              <option value="Français">🇫🇷 Français</option>
-            </select>
-          </div>
-        </div>
+    <div class="card mb-3">
+      <div class="card-header-brand">
+        <h6 class="mb-0"><i class="bi bi-translate me-2"></i>2. Język</h6>
       </div>
-      <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-header-brand">
-            <h6 class="mb-0">
-              <i class="bi bi-diagram-3 me-2"></i>4. Liczba klastrów:
-              <span id="slider-val" class="slider-val">5</span>
-            </h6>
-          </div>
-          <div class="card-body p-4 d-flex align-items-center gap-3">
-            <span class="text-muted small">3</span>
-            <input type="range" id="liczba_klastrow" class="form-range flex-grow-1"
-                   min="3" max="10" value="5">
-            <span class="text-muted small">10</span>
-          </div>
-        </div>
+      <div class="card-body p-4">
+        <select id="jezyk" class="form-select form-select-lg" style="max-width:320px">
+          <option value="Polski" selected>🇵🇱 Polski</option>
+          <option value="English">🇬🇧 English</option>
+          <option value="Deutsch">🇩🇪 Deutsch</option>
+          <option value="Français">🇫🇷 Français</option>
+        </select>
       </div>
     </div>
 
     {% if not api_key_set %}
     <div class="card mb-3">
       <div class="card-header-brand">
-        <h6 class="mb-0"><i class="bi bi-key me-2"></i>5. Klucz Anthropic API</h6>
+        <h6 class="mb-0"><i class="bi bi-key me-2"></i>3. Klucz Anthropic API</h6>
       </div>
       <div class="card-body p-4">
         <input type="password" id="api_key" class="form-control form-control-lg"
@@ -160,19 +125,13 @@
 
 {% block scripts %}
 <script>
-// ── Slider label ──────────────────────────────────────────────────────────────
-const slider = document.getElementById('liczba_klastrow');
-const sliderVal = document.getElementById('slider-val');
-slider.addEventListener('input', () => sliderVal.textContent = slider.value);
-
-// ── Sections ─────────────────────────────────────────────────────────────────
 const $form       = document.getElementById('form-section');
 const $generating = document.getElementById('generating-section');
 const $done       = document.getElementById('done-section');
 const $error      = document.getElementById('error-section');
 
-function show(el)  { el.style.display = 'block'; }
-function hide(el)  { el.style.display = 'none';  }
+function show(el) { el.style.display = 'block'; }
+function hide(el) { el.style.display = 'none';  }
 
 function resetForm() {
   show($form);
@@ -183,7 +142,6 @@ function resetForm() {
   document.getElementById('log-box').innerHTML   = '';
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
 let _pollTimer = null;
 
 function startPolling(taskId) {
@@ -206,8 +164,8 @@ function startPolling(taskId) {
         clearInterval(_pollTimer);
         hide($generating);
         show($done);
-        document.getElementById('done-msg').textContent  = data.message;
-        document.getElementById('btn-download').href     = `/blog-planner/download/${taskId}`;
+        document.getElementById('done-msg').textContent = data.message;
+        document.getElementById('btn-download').href    = `/blog-planner/download/${taskId}`;
       } else if (data.status === 'error') {
         clearInterval(_pollTimer);
         hide($generating);
@@ -218,30 +176,29 @@ function startPolling(taskId) {
   }, 1500);
 }
 
-// ── Submit ────────────────────────────────────────────────────────────────────
 document.getElementById('btn-generate').addEventListener('click', async () => {
-  const tematyka = document.getElementById('tematyka').value.trim();
-  if (!tematyka) {
-    alert('Uzupełnij pole Tematyka bloga.');
-    document.getElementById('tematyka').focus();
+  const frazy = document.getElementById('frazy').value.trim();
+  if (!frazy) {
+    alert('Wpisz frazy kategorii.');
+    document.getElementById('frazy').focus();
     return;
   }
 
-  const apiKey = document.getElementById('api_key').value.trim();
   {% if not api_key_set %}
+  const apiKey = document.getElementById('api_key').value.trim();
   if (!apiKey) {
     alert('Podaj klucz Anthropic API.');
     document.getElementById('api_key').focus();
     return;
   }
+  {% else %}
+  const apiKey = '';
   {% endif %}
 
   const body = new FormData();
-  body.append('shop_url',        document.getElementById('shop_url').value.trim());
-  body.append('tematyka',        tematyka);
-  body.append('jezyk',           document.getElementById('jezyk').value);
-  body.append('liczba_klastrow', slider.value);
-  body.append('api_key',         apiKey);
+  body.append('frazy',   frazy);
+  body.append('jezyk',   document.getElementById('jezyk').value);
+  body.append('api_key', apiKey);
 
   hide($form);
   hide($done);

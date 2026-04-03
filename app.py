@@ -15,7 +15,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from audit_runner import run_audit
 from gsc_client import list_properties
-from blog_planner import scrape_site_context, generate_blog_plan, export_excel
+from blog_planner import generate_blog_plan, export_excel, make_filename
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -235,14 +235,12 @@ def blog_planner():
 
 @app.route("/blog-planner/generate", methods=["POST"])
 def blog_planner_generate():
-    shop_url  = request.form.get("shop_url", "").strip()
-    tematyka  = request.form.get("tematyka", "").strip()
-    jezyk     = request.form.get("jezyk", "Polski").strip()
-    liczba    = int(request.form.get("liczba_klastrow", 5))
-    api_key   = request.form.get("api_key", "").strip() or ANTHROPIC_API_KEY
+    frazy   = request.form.get("frazy", "").strip()
+    jezyk   = request.form.get("jezyk", "Polski").strip()
+    api_key = request.form.get("api_key", "").strip() or ANTHROPIC_API_KEY
 
-    if not tematyka:
-        return jsonify({"error": "Pole 'Tematyka bloga' jest wymagane."}), 400
+    if not frazy:
+        return jsonify({"error": "Pole 'Frazy kategorii' jest wymagane."}), 400
     if not api_key:
         return jsonify({"error": "Podaj klucz Anthropic API."}), 400
 
@@ -255,7 +253,7 @@ def blog_planner_generate():
         "log":         [],
         "result_path": None,
         "error":       None,
-        "tematyka":    tematyka,
+        "frazy":       frazy,
     }
 
     def _progress(pct: int, msg: str):
@@ -267,26 +265,24 @@ def blog_planner_generate():
         try:
             import anthropic as _anthropic
 
-            site_ctx = None
-            if shop_url:
-                _progress(10, f"Scrapuję dane strony: {shop_url}…")
-                try:
-                    site_ctx = scrape_site_context(shop_url)
-                    _progress(25, f"Pobrano dane strony (kategorii: {len(site_ctx.get('categories', []))}).")
-                except Exception as e:
-                    _progress(25, f"Scraping pominięty: {e}")
+            n_phrases = len([f for f in frazy.split(",") if f.strip()])
+            _progress(10, f"Generuję plan dla {n_phrases} fraz kategorii przez Claude API…")
 
-            _progress(35, "Generuję plan bloga przez Claude API…")
             client = _anthropic.Anthropic(api_key=api_key)
-            plan = generate_blog_plan(client, tematyka, jezyk, liczba, site_ctx)
+            plan   = generate_blog_plan(client, frazy, jezyk)
 
-            total = sum(1 + len(c.get("supporting", [])) for c in plan.get("clusters", []))
-            _progress(80, f"Plan gotowy — {len(plan['clusters'])} klastrów, {total} wpisów. Generuję Excel…")
+            cats        = plan.get("categories", [])
+            n_pillars   = sum(len(c.get("clusters", [])) for c in cats)
+            n_supporting = sum(
+                len(cl.get("supporting", []))
+                for c in cats for cl in c.get("clusters", [])
+            )
+            _progress(85, f"Plan gotowy — {len(cats)} kategorii, {n_pillars} pytań pillar, {n_supporting} fraz supporting. Generuję Excel…")
 
-            path = export_excel(plan, tematyka)
+            path = export_excel(plan, frazy)
             _tasks[task_id]["status"]      = "done"
             _tasks[task_id]["result_path"] = path
-            _progress(100, f"Gotowe! {len(plan['clusters'])} klastrów, {total} wpisów łącznie.")
+            _progress(100, f"Gotowe! {len(cats)} kategorii · {n_pillars} pillarów · {n_supporting} fraz supporting.")
         except Exception as e:
             _tasks[task_id]["status"] = "error"
             _tasks[task_id]["error"]  = str(e)
@@ -302,8 +298,7 @@ def blog_planner_download(task_id: str):
     if not task or task.get("type") != "blog" or task["status"] != "done":
         return "Plik nie jest gotowy.", 404
 
-    slug = re.sub(r"[^\w]", "_", task.get("tematyka", "blog"))[:40]
-    filename = f"plan_bloga_{slug}.xlsx"
+    filename = make_filename(task.get("frazy", "blog"))
 
     return send_file(
         task["result_path"],

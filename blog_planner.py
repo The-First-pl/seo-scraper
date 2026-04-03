@@ -3,62 +3,40 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+from datetime import date
 
 import anthropic
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Alignment, Border, Font, PatternFill, Side
-)
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-
-from scraper import _get, scrape_page_meta, discover_categories
-
-# ── Scraping site context ─────────────────────────────────────────────────────
-
-def scrape_site_context(url: str) -> dict:
-    """
-    Collect basic SEO signals from the given URL to enrich the Claude prompt.
-    Returns a dict with title, description, and a sample of category names.
-    """
-    meta = scrape_page_meta(url)
-    try:
-        categories = discover_categories(url)
-        cat_names = [u.rstrip("/").split("/")[-1].replace("-", " ") for u in categories[:15]]
-    except Exception:
-        cat_names = []
-
-    return {
-        "title": meta.get("meta_title", ""),
-        "description": meta.get("meta_description", ""),
-        "categories": cat_names,
-    }
-
 
 # ── Claude prompt & parsing ───────────────────────────────────────────────────
 
-_PROMPT_TEMPLATE = """Jesteś ekspertem SEO i content marketingu. Na podstawie poniższych danych zaplanuj blog.
+_PROMPT = """Jesteś ekspertem SEO. Otrzymujesz frazy kategorii sklepu internetowego.
+Twoim zadaniem NIE jest pisanie o tych produktach — \
+twoim zadaniem jest znalezienie PYTAŃ jakie zadają użytkownicy \
+PRZED zakupem produktów z tych kategorii.
 
-Tematyka: {tematyka}
+Frazy kategorii: {frazy}
 Język: {jezyk}
-Liczba klastrów tematycznych: {liczba_klastrow}
-{site_section}
-Wygeneruj plan bloga w formacie JSON:
+
+Dla każdej frazy kategorii wygeneruj plan w formacie JSON:
+
 {{
-  "clusters": [
+  "categories": [
     {{
-      "name": "Nazwa kontenera tematycznego",
-      "pillar": {{
-        "title": "Tytuł wpisu głównego (pillar)",
-        "main_phrase": "fraza główna",
-        "intent": "informacyjna|zakupowa|nawigacyjna|posprzedażowa",
-        "priority": 1
-      }},
-      "supporting": [
+      "category_phrase": "kosiarki spalinowe",
+      "clusters": [
         {{
-          "title": "Tytuł wpisu wspierającego",
-          "main_phrase": "fraza wspierająca",
-          "intent": "informacyjna|zakupowa|nawigacyjna|posprzedażowa",
-          "priority": 2
+          "pillar_question": "Jaką kosiarkę spalinową kupić?",
+          "pillar_phrase": "jaką kosiarkę spalinową kupić",
+          "intent": "zakupowa",
+          "supporting": [
+            {{
+              "phrase": "jaka kosiarka spalinowa do małego ogrodu",
+              "intent": "zakupowa"
+            }}
+          ]
         }}
       ]
     }}
@@ -66,41 +44,29 @@ Wygeneruj plan bloga w formacie JSON:
 }}
 
 Zasady:
-- Liczba klastrów musi wynosić dokładnie {liczba_klastrow}
-- Każdy klaster ma dokładnie 1 pillar + od 4 do 8 supporting
-- Frazy mają być realistyczne, w języku: {jezyk}
-- Intencja musi być dopasowana do frazy (informacyjna dla "jak", zakupowa dla "kup/sklep/cena", nawigacyjna dla brandowych, posprzedażowa dla "opinie/recenzja")
-- Pillar zawsze priority: 1, supporting: 2–4 według ważności
-- Zwróć TYLKO JSON, bez żadnego tekstu przed ani po"""
+- Frazy pillar to PYTANIA użytkowników, nie nazwy produktów
+- Frazy supporting to zawężenia, warianty i porównania frazy pillar
+- NIE twórz wpisów o samych produktach — tylko poradniki i pytania
+- Każda kategoria ma 3-5 klastrów (pytań pillar)
+- Każdy klaster ma 4-6 fraz wspierających
+- Intencje: informacyjna, zakupowa, porównawcza, posprzedażowa
+- Zwróć TYLKO JSON, bez tekstu przed ani po"""
 
-_RETRY_SUFFIX = "\n\nUWAGA: Poprzednia odpowiedź zawierała niepoprawny JSON. Zwróć TYLKO poprawny JSON, nic więcej."
+_RETRY_SUFFIX = (
+    "\n\nUWAGA: Poprzednia odpowiedź zawierała niepoprawny JSON. "
+    "Zwróć TYLKO poprawny JSON, nic więcej."
+)
 
-
-def _build_prompt(tematyka: str, jezyk: str, liczba: int, site_ctx: dict | None) -> str:
-    if site_ctx:
-        parts = []
-        if site_ctx.get("title"):
-            parts.append(f"Tytuł strony: {site_ctx['title']}")
-        if site_ctx.get("description"):
-            parts.append(f"Meta description: {site_ctx['description']}")
-        if site_ctx.get("categories"):
-            parts.append("Istniejące kategorie/podstrony: " + ", ".join(site_ctx["categories"]))
-        site_section = "Dane strony:\n" + "\n".join(parts) + "\n\n" if parts else ""
-    else:
-        site_section = ""
-
-    return _PROMPT_TEMPLATE.format(
-        tematyka=tematyka,
-        jezyk=jezyk,
-        liczba_klastrow=liczba,
-        site_section=site_section,
-    )
+INTENT_LABELS = {
+    "informacyjna":  "ℹ️ Informacyjna",
+    "zakupowa":      "🛒 Zakupowa",
+    "porównawcza":   "⚖️ Porównawcza",
+    "posprzedażowa": "⭐ Posprzedażowa",
+}
 
 
 def _parse_json(text: str) -> dict:
-    """Extract and parse JSON from Claude's response, handling markdown fences."""
     text = text.strip()
-    # Strip ```json ... ``` fences
     fence = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
     if fence:
         text = fence.group(1).strip()
@@ -109,21 +75,19 @@ def _parse_json(text: str) -> dict:
 
 def generate_blog_plan(
     client: anthropic.Anthropic,
-    tematyka: str,
+    frazy: str,
     jezyk: str,
-    liczba: int,
-    site_ctx: dict | None,
 ) -> dict:
     """
-    Calls Claude to generate the blog plan. Retries once with a stricter prompt
-    if the first response cannot be parsed as JSON.
+    Sends category phrases to Claude and returns a parsed JSON plan.
+    Retries once with a stricter instruction if the response isn't valid JSON.
     """
-    prompt = _build_prompt(tematyka, jezyk, liczba, site_ctx)
+    prompt = _PROMPT.format(frazy=frazy, jezyk=jezyk)
 
     for attempt in range(2):
         msg = client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=4096,
+            max_tokens=8000,
             messages=[{"role": "user", "content": prompt + (_RETRY_SUFFIX if attempt else "")}],
         )
         raw = msg.content[0].text
@@ -132,7 +96,7 @@ def generate_blog_plan(
         except (json.JSONDecodeError, ValueError):
             if attempt == 1:
                 raise ValueError(
-                    f"Claude zwrócił niepoprawny JSON po 2 próbach.\n\nOdpowiedź:\n{raw[:500]}"
+                    f"Claude zwrócił niepoprawny JSON po 2 próbach.\n\nOdpowiedź:\n{raw[:600]}"
                 )
 
     raise RuntimeError("unreachable")
@@ -140,147 +104,158 @@ def generate_blog_plan(
 
 # ── Excel export ──────────────────────────────────────────────────────────────
 
-_HDR_FILL    = PatternFill("solid", fgColor="404040")
-_PILLAR_FILL = PatternFill("solid", fgColor="FFF9C4")   # light yellow
+_CAT_FILL    = PatternFill("solid", fgColor="2E2E2E")   # dark grey  — category header
+_PILLAR_FILL = PatternFill("solid", fgColor="FFF9C4")   # light yellow — pillar
 _WHITE_FILL  = PatternFill("solid", fgColor="FFFFFF")
-_CLUSTER_FILLS = [
-    PatternFill("solid", fgColor="E3F2FD"),  # blue-50
-    PatternFill("solid", fgColor="E8F5E9"),  # green-50
-    PatternFill("solid", fgColor="F3E5F5"),  # purple-50
-    PatternFill("solid", fgColor="FFF3E0"),  # orange-50
-    PatternFill("solid", fgColor="FCE4EC"),  # pink-50
-]
+_HDR_FILL    = PatternFill("solid", fgColor="1F3864")   # nav dark blue — column headers
 
-_HDR_FONT   = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
-_BODY_FONT  = Font(name="Calibri", size=10)
-_BOLD_FONT  = Font(name="Calibri", bold=True, size=10)
+_CAT_FONT    = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+_HDR_FONT    = Font(name="Calibri", bold=True, color="FFFFFF", size=10)
+_PILLAR_FONT = Font(name="Calibri", bold=True, size=10)
+_BODY_FONT   = Font(name="Calibri", size=10)
 
-_THIN = Side(style="thin", color="CCCCCC")
+_THIN   = Side(style="thin",   color="CCCCCC")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
-INTENT_LABELS = {
-    "informacyjna":    "ℹ️ Informacyjna",
-    "zakupowa":        "🛒 Zakupowa",
-    "nawigacyjna":     "🧭 Nawigacyjna",
-    "posprzedażowa":   "⭐ Posprzedażowa",
-}
-
 COLUMNS = [
-    ("Klaster",       28),
-    ("Typ",           16),
-    ("Tytuł wpisu",   52),
-    ("Fraza główna",  34),
-    ("Intencja",      20),
-    ("Priorytet",     11),
-    ("Status",        18),
+    ("Fraza kategorii",    30),
+    ("Pytanie pillar",     42),
+    ("Fraza wspierająca",  46),
+    ("Intencja",           22),
+    ("Wyszukania",         14),
+    ("Status",             16),
 ]
+N_COLS = len(COLUMNS)
 
 
-def _cell(ws, row: int, col: int, value, font=None, fill=None, align=None):
-    c = ws.cell(row=row, column=col, value=value)
-    c.font   = font  or _BODY_FONT
-    c.fill   = fill  or _WHITE_FILL
-    c.border = _BORDER
-    c.alignment = align or Alignment(vertical="top", wrap_text=True)
-    return c
+def _c(ws, row: int, col: int, value="", *, font=None, fill=None, align=None, merge_end_row=None):
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font      = font  or _BODY_FONT
+    cell.fill      = fill  or _WHITE_FILL
+    cell.border    = _BORDER
+    cell.alignment = align or Alignment(vertical="top", wrap_text=True)
+    return cell
 
 
-def export_excel(plan: dict, tematyka: str) -> str:
-    """Serialize the blog plan to an .xlsx temp file. Returns the file path."""
-    wb = Workbook()
-    ws = wb.active
+def export_excel(plan: dict, frazy: str) -> str:
+    """Write the blog plan to a temp .xlsx file and return its path."""
+    wb  = Workbook()
+    ws  = wb.active
     ws.title = "Plan bloga"
 
-    # ── Header row ────────────────────────────────────────────────────────────
-    for col_idx, (label, width) in enumerate(COLUMNS, 1):
-        c = ws.cell(row=1, column=col_idx, value=label)
+    # ── Column headers ────────────────────────────────────────────────────────
+    center = Alignment(horizontal="center", vertical="center")
+    for ci, (label, width) in enumerate(COLUMNS, 1):
+        c = ws.cell(row=1, column=ci, value=label)
         c.font      = _HDR_FONT
         c.fill      = _HDR_FILL
         c.border    = _BORDER
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-    ws.row_dimensions[1].height = 24
+        c.alignment = center
+        ws.column_dimensions[get_column_letter(ci)].width = width
+    ws.row_dimensions[1].height = 22
     ws.freeze_panes = "A2"
 
-    # ── Data rows ─────────────────────────────────────────────────────────────
     row = 2
-    clusters = plan.get("clusters", [])
+    for cat in plan.get("categories", []):
+        cat_phrase = cat.get("category_phrase", "")
+        clusters   = cat.get("clusters", [])
 
-    for cl_idx, cluster in enumerate(clusters):
-        cluster_fill = _CLUSTER_FILLS[cl_idx % len(_CLUSTER_FILLS)]
-        cluster_name = cluster.get("name", f"Klaster {cl_idx + 1}")
-        pillar       = cluster.get("pillar", {})
-        supporting   = cluster.get("supporting", [])
-        total_rows   = 1 + len(supporting)
-        first_row    = row
+        # Count rows this category spans: one pillar row + supporting rows per cluster
+        cat_span = sum(1 + len(cl.get("supporting", [])) for cl in clusters)
+        cat_first_row = row
 
-        # Pillar row
-        _cell(ws, row, 1, cluster_name, font=_BOLD_FONT, fill=cluster_fill,
-              align=Alignment(vertical="center", wrap_text=True, horizontal="center"))
-        _cell(ws, row, 2, "🟢 Pillar",    font=_BOLD_FONT, fill=_PILLAR_FILL)
-        _cell(ws, row, 3, pillar.get("title", ""),        font=_BOLD_FONT, fill=_PILLAR_FILL)
-        _cell(ws, row, 4, pillar.get("main_phrase", ""),  font=_BOLD_FONT, fill=_PILLAR_FILL)
-        _cell(ws, row, 5,
-              INTENT_LABELS.get(pillar.get("intent", ""), pillar.get("intent", "")),
-              fill=_PILLAR_FILL)
-        _cell(ws, row, 6, pillar.get("priority", 1),      fill=_PILLAR_FILL,
-              align=Alignment(horizontal="center", vertical="top"))
-        _cell(ws, row, 7, "", fill=_PILLAR_FILL)
-        ws.row_dimensions[row].height = 36
-        row += 1
+        for cl in clusters:
+            pillar_q      = cl.get("pillar_question", "")
+            pillar_phrase = cl.get("pillar_phrase", "")
+            pillar_intent = cl.get("intent", "")
+            supporting    = cl.get("supporting", [])
+            cluster_span  = 1 + len(supporting)
+            pillar_row    = row
 
-        # Supporting rows
-        for art in supporting:
-            _cell(ws, row, 1, "", fill=cluster_fill)   # blank — visually grouped by cluster color
-            _cell(ws, row, 2, "🔵 Supporting")
-            _cell(ws, row, 3, art.get("title", ""))
-            _cell(ws, row, 4, art.get("main_phrase", ""))
-            _cell(ws, row, 5, INTENT_LABELS.get(art.get("intent", ""), art.get("intent", "")))
-            _cell(ws, row, 6, art.get("priority", 2),
-                  align=Alignment(horizontal="center", vertical="top"))
-            _cell(ws, row, 7, "")
-            ws.row_dimensions[row].height = 30
+            # ── Pillar row ────────────────────────────────────────────────────
+            _c(ws, row, 1, cat_phrase,
+               font=_CAT_FONT, fill=_CAT_FILL,
+               align=Alignment(horizontal="center", vertical="center", wrap_text=True))
+            _c(ws, row, 2, pillar_q,
+               font=_PILLAR_FONT, fill=_PILLAR_FILL,
+               align=Alignment(vertical="center", wrap_text=True))
+            _c(ws, row, 3, pillar_phrase,
+               font=_PILLAR_FONT, fill=_PILLAR_FILL)
+            _c(ws, row, 4,
+               INTENT_LABELS.get(pillar_intent, pillar_intent),
+               font=_PILLAR_FONT, fill=_PILLAR_FILL,
+               align=Alignment(vertical="top", horizontal="center"))
+            _c(ws, row, 5, "", fill=_PILLAR_FILL)
+            _c(ws, row, 6, "", fill=_PILLAR_FILL)
+            ws.row_dimensions[row].height = 32
             row += 1
 
-        # Merge cluster name cell vertically
-        if total_rows > 1:
+            # ── Supporting rows ───────────────────────────────────────────────
+            for sup in supporting:
+                _c(ws, row, 1, "",  font=_CAT_FONT, fill=_CAT_FILL)  # col 1: cat colour stripe
+                _c(ws, row, 2, "",  fill=_WHITE_FILL)                 # col 2: empty (pillar merged above)
+                _c(ws, row, 3, sup.get("phrase", ""))
+                intent_raw = sup.get("intent", "")
+                _c(ws, row, 4,
+                   INTENT_LABELS.get(intent_raw, intent_raw),
+                   align=Alignment(vertical="top", horizontal="center", wrap_text=True))
+                _c(ws, row, 5, "")
+                _c(ws, row, 6, "")
+                ws.row_dimensions[row].height = 24
+                row += 1
+
+            # Merge pillar question cell vertically across its supporting rows
+            if cluster_span > 1:
+                ws.merge_cells(
+                    start_row=pillar_row,   start_column=2,
+                    end_row=pillar_row + cluster_span - 1, end_column=2,
+                )
+
+        # Merge category phrase cell vertically across all its clusters
+        if cat_span > 1:
             ws.merge_cells(
-                start_row=first_row, start_column=1,
-                end_row=first_row + total_rows - 1, end_column=1,
+                start_row=cat_first_row, start_column=1,
+                end_row=cat_first_row + cat_span - 1, end_column=1,
             )
 
-    # ── Summary tab ──────────────────────────────────────────────────────────
+    # ── Summary sheet ─────────────────────────────────────────────────────────
     ws2 = wb.create_sheet("Podsumowanie")
-    ws2.column_dimensions["A"].width = 30
-    ws2.column_dimensions["B"].width = 12
-
-    summary_hdr = [("Klaster", "Łącznie wpisów")]
-    for col_idx, label in enumerate(summary_hdr[0], 1):
-        c = ws2.cell(row=1, column=col_idx, value=label)
+    sum_cols = [("Fraza kategorii", 32), ("Klastrów (pillar)", 18), ("Fraz supporting", 18), ("Razem fraz", 14)]
+    for ci, (label, width) in enumerate(sum_cols, 1):
+        c = ws2.cell(row=1, column=ci, value=label)
         c.font = _HDR_FONT; c.fill = _HDR_FILL; c.border = _BORDER
-        c.alignment = Alignment(horizontal="center")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws2.column_dimensions[get_column_letter(ci)].width = width
+    ws2.row_dimensions[1].height = 22
     ws2.freeze_panes = "A2"
 
-    total_articles = 0
-    for r_idx, cluster in enumerate(clusters, 2):
-        count = 1 + len(cluster.get("supporting", []))
-        total_articles += count
-        c1 = ws2.cell(row=r_idx, column=1, value=cluster.get("name", ""))
-        c1.font = _BODY_FONT; c1.border = _BORDER
-        c1.alignment = Alignment(wrap_text=True, vertical="top")
-        c2 = ws2.cell(row=r_idx, column=2, value=count)
-        c2.font = _BODY_FONT; c2.border = _BORDER
-        c2.alignment = Alignment(horizontal="center")
+    total_pillars = total_sup = 0
+    for ri, cat in enumerate(plan.get("categories", []), 2):
+        clusters   = cat.get("clusters", [])
+        n_pillars  = len(clusters)
+        n_sup      = sum(len(cl.get("supporting", [])) for cl in clusters)
+        total_pillars += n_pillars
+        total_sup     += n_sup
 
-    # Total row
-    tr = len(clusters) + 2
-    c1 = ws2.cell(row=tr, column=1, value="RAZEM")
-    c1.font = _BOLD_FONT; c1.border = _BORDER
-    c2 = ws2.cell(row=tr, column=2, value=total_articles)
-    c2.font = _BOLD_FONT; c2.border = _BORDER
-    c2.alignment = Alignment(horizontal="center")
+        for ci, val in enumerate([cat.get("category_phrase", ""), n_pillars, n_sup, n_pillars + n_sup], 1):
+            c = ws2.cell(row=ri, column=ci, value=val)
+            c.font = _BODY_FONT; c.border = _BORDER
+            c.alignment = Alignment(horizontal="center" if ci > 1 else "left", vertical="top", wrap_text=True)
+
+    tr = len(plan.get("categories", [])) + 2
+    for ci, val in enumerate(["RAZEM", total_pillars, total_sup, total_pillars + total_sup], 1):
+        c = ws2.cell(row=tr, column=ci, value=val)
+        c.font = _PILLAR_FONT; c.fill = _PILLAR_FILL; c.border = _BORDER
+        c.alignment = Alignment(horizontal="center" if ci > 1 else "left")
 
     tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
     wb.save(tmp.name)
     tmp.close()
     return tmp.name
+
+
+def make_filename(frazy: str) -> str:
+    """Generate a human-readable filename from the category phrases."""
+    first_phrase = frazy.split(",")[0].strip()
+    slug = re.sub(r"[^\w]", "_", first_phrase)[:35].strip("_").lower()
+    return f"plan_bloga_{slug}_{date.today().isoformat()}.xlsx"
