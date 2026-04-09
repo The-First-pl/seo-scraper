@@ -25,11 +25,67 @@ _SHOPER_SITEMAP   = "/console/integration/execute/name/GoogleSitemap"
 # Shoper pagination pages: /slug/2, /slug/3 … — skip, keep only /slug (page 1)
 _SHOPER_PAGINATION_RE = re.compile(r"/\d+$")
 
+# Candidate sitemap paths tried when robots.txt doesn't provide a Sitemap: directive
+SITEMAP_CANDIDATES = [
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    "/sitemap-index.xml",
+    "/sitemap/sitemap-index.xml",
+    "/1_index_sitemap.xml",      # PrestaShop default
+    "/sitemap_index.xml.gz",
+]
+
 # Patterns that identify a URL as a product category page
 _WC_CATEGORY_RE   = re.compile(r"/(product-category|kategoria-produktu|product_cat)/")
 _SHOPER_CAT_RE    = re.compile(r"/c/[^/]")                   # /c/nazwa or /c/nazwa/123
 _PS_CATEGORY_RE   = re.compile(r"/(categor|kategori)[^/]")   # /category/, /kategorie/, /kategoria-...
 _PS_NUMERIC_RE    = re.compile(r"/\d+-[a-z]")                # /123-slug (PrestaShop default)
+
+# WordPress slugs that are never meaningful sections (skip from category-sitemap).
+# Match at end-of-string too — _normalize strips trailing slashes.
+_WP_SKIP_SLUGS    = re.compile(
+    r"/(bez-kategorii|uncategorized|tagi|tag|author|autor)(/|$)",
+    re.IGNORECASE,
+)
+
+
+def _find_sitemap_url(base_url: str) -> tuple[str | None, object | None, list[str]]:
+    """
+    Discovers the main sitemap URL using two strategies (in order):
+      1. Parse /robots.txt and extract every 'Sitemap:' directive.
+      2. Probe SITEMAP_CANDIDATES one by one.
+    Returns (sitemap_url, response, checked_urls).
+    If nothing is found, sitemap_url and response are None and checked_urls
+    lists every URL that was tried (useful for error messages).
+    """
+    checked: list[str] = []
+    candidates: list[str] = []
+
+    # ── Strategy 1: robots.txt ────────────────────────────────────────────────
+    robots_url = f"{base_url}/robots.txt"
+    checked.append(robots_url)
+    r = _get(robots_url, timeout=8)
+    if r and r.status_code == 200:
+        for line in r.text.splitlines():
+            if line.strip().lower().startswith("sitemap:"):
+                url = line.split(":", 1)[1].strip()
+                if url not in candidates:
+                    candidates.append(url)
+
+    # ── Strategy 2: standard candidates (skip any already found via robots.txt)
+    for path in SITEMAP_CANDIDATES:
+        url = base_url + path
+        if url not in candidates:
+            candidates.append(url)
+
+    # ── Try each candidate in order ───────────────────────────────────────────
+    for url in candidates:
+        checked.append(url)
+        resp = _get(url, timeout=10)
+        if resp and _is_xml(resp):
+            return url, resp, checked
+
+    return None, None, checked
 
 
 def _get(url: str, timeout: int = 15):
@@ -63,41 +119,78 @@ def _extract_locs(xml_text: str) -> list[str]:
 
 def _try_woocommerce(base_url: str) -> list[str] | None:
     """
-    WooCommerce/WordPress (Yoast): sitemap index at /sitemap.xml or /sitemap_index.xml
-    contains sub-sitemaps; we filter those whose URL contains 'product_cat' or 'categor'.
-    Then collect all <loc> URLs from matching sub-sitemaps and filter by WC category path.
+    WordPress / WooCommerce (Yoast SEO sitemap index).
+    Works for both WooCommerce shops and plain WordPress sites without a shop.
+
+    Priority order — returns the first non-empty result:
+      1. WooCommerce product categories  (product_cat sub-sitemap)
+      2. WordPress blog categories       (category-sitemap.xml, excl. "bez-kategorii")
+      3. WordPress static pages          (page-sitemap.xml, excl. homepage)
+
+    Handles both /sitemap.xml and /sitemap_index.xml (identical on Yoast installs).
     """
-    found: set[str] = set()
+    _, r, _ = _find_sitemap_url(base_url)
+    if not r:
+        return None
 
-    for index_url in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml"]:
-        r = _get(index_url, timeout=10)
-        if not r or not _is_xml(r):
+    soup = BeautifulSoup(r.text, "lxml-xml")
+    sub_sitemaps = soup.find_all("sitemap")
+    if not sub_sitemaps:
+        return None  # flat sitemap — handled by _try_generic
+
+    # Classify sub-sitemaps by type
+    sm_product_cat: list[str] = []
+    sm_category:    list[str] = []
+    sm_page:        list[str] = []
+
+    for sm in sub_sitemaps:
+        loc = sm.find("loc")
+        if not loc:
             continue
+        url = loc.text.strip()
+        if "product_cat" in url:
+            sm_product_cat.append(url)
+        elif any(k in url for k in ("categor", "kategori")):
+            sm_category.append(url)
+        elif "page" in url and "page-sitemap" in url:
+            sm_page.append(url)
 
-        soup = BeautifulSoup(r.text, "lxml-xml")
-        sub_sitemaps = soup.find_all("sitemap")
-        if not sub_sitemaps:
-            continue  # not an index — handled by _try_generic
-
-        cat_sitemaps = [
-            loc.text.strip()
-            for sm in sub_sitemaps
-            if (loc := sm.find("loc")) and
-               any(k in loc.text for k in ("product_cat", "categor", "kategori"))
-        ]
-        if not cat_sitemaps:
-            return None  # looks like WooCommerce index but no category sub-sitemap
-
-        for sm_url in cat_sitemaps:
+    def _collect(sm_urls: list[str], predicate) -> set[str]:
+        found: set[str] = set()
+        for sm_url in sm_urls:
             inner = _get(sm_url, timeout=10)
             if not inner:
                 continue
             for raw in _extract_locs(inner.text):
                 u = _normalize(raw, base_url)
-                if u and _WC_CATEGORY_RE.search(u):
+                if u and predicate(u):
                     found.add(u)
+        return found
 
-        return sorted(found) if found else None
+    # Priority 1: WooCommerce product categories
+    result = _collect(sm_product_cat, lambda u: bool(_WC_CATEGORY_RE.search(u)))
+    if result:
+        return sorted(result)
+
+    # Priority 2: WordPress blog categories (skip junk slugs like "bez-kategorii")
+    result = _collect(sm_category, lambda u: not _WP_SKIP_SLUGS.search(u))
+    if result:
+        return sorted(result)
+
+    # Priority 3: WordPress pages — top-level and one-level-deep only (skip homepage
+    # and deeply nested pages that are typically plugin-generated product listings).
+    base_https = base_url.replace("http://", "https://")
+
+    def _page_ok(u: str) -> bool:
+        if u == base_https:
+            return False
+        # Depth = number of "/" in the path after stripping the domain and leading slash
+        depth = u.replace(base_https, "").strip("/").count("/")
+        return depth <= 1
+
+    result = _collect(sm_page, _page_ok)
+    if result:
+        return sorted(result)
 
     return None
 
@@ -166,54 +259,47 @@ def _try_shoper(base_url: str) -> list[str] | None:
 
 def _try_prestashop(base_url: str) -> list[str] | None:
     """
-    PrestaShop: sitemap at /sitemap.xml or /1_index_sitemap.xml.
+    PrestaShop: sitemap discovered via _find_sitemap_url (covers /sitemap.xml,
+    /1_index_sitemap.xml, robots.txt entries, etc.).
     Can be a flat file or an index referencing sub-sitemaps.
     Category URLs match /category/, /categor*, /kategoria/ or numeric slug pattern.
     """
+    _, r, _ = _find_sitemap_url(base_url)
+    if not r:
+        return None
+
     found: set[str] = set()
+    soup = BeautifulSoup(r.text, "lxml-xml")
 
-    for index_url in [
-        f"{base_url}/sitemap.xml",
-        f"{base_url}/1_index_sitemap.xml",
-    ]:
-        r = _get(index_url, timeout=10)
-        if not r or not _is_xml(r):
-            continue
-
-        soup = BeautifulSoup(r.text, "lxml-xml")
-
-        # Index with sub-sitemaps?
-        sub_sitemaps = soup.find_all("sitemap")
-        if sub_sitemaps:
-            # Prefer sub-sitemaps explicitly named for categories
-            cat_sub = [
-                loc.text.strip()
-                for sm in sub_sitemaps
-                if (loc := sm.find("loc")) and
-                   any(k in loc.text for k in ("categor", "kategori", "category"))
-            ]
-            targets = cat_sub if cat_sub else [loc.text.strip()
-                                               for sm in sub_sitemaps
-                                               if (loc := sm.find("loc"))]
-            for sm_url in targets:
-                inner = _get(sm_url, timeout=10)
-                if not inner:
-                    continue
-                for raw in _extract_locs(inner.text):
-                    u = _normalize(raw, base_url)
-                    if u and _is_prestashop_category(u):
-                        found.add(u)
-        else:
-            # Flat sitemap
-            for raw in _extract_locs(r.text):
+    # Index with sub-sitemaps?
+    sub_sitemaps = soup.find_all("sitemap")
+    if sub_sitemaps:
+        # Prefer sub-sitemaps explicitly named for categories
+        cat_sub = [
+            loc.text.strip()
+            for sm in sub_sitemaps
+            if (loc := sm.find("loc")) and
+               any(k in loc.text for k in ("categor", "kategori", "category"))
+        ]
+        targets = cat_sub if cat_sub else [
+            loc.text.strip() for sm in sub_sitemaps if (loc := sm.find("loc"))
+        ]
+        for sm_url in targets:
+            inner = _get(sm_url, timeout=10)
+            if not inner:
+                continue
+            for raw in _extract_locs(inner.text):
                 u = _normalize(raw, base_url)
                 if u and _is_prestashop_category(u):
                     found.add(u)
+    else:
+        # Flat sitemap
+        for raw in _extract_locs(r.text):
+            u = _normalize(raw, base_url)
+            if u and _is_prestashop_category(u):
+                found.add(u)
 
-        if found:
-            return sorted(found)
-
-    return None
+    return sorted(found) if found else None
 
 
 def _is_prestashop_category(url: str) -> bool:
@@ -222,11 +308,12 @@ def _is_prestashop_category(url: str) -> bool:
 
 def _try_generic(base_url: str) -> list[str] | None:
     """
-    Fallback: parse /sitemap.xml as a flat file and apply broad heuristics
-    to identify category-like URLs (non-product, non-blog, has path depth 1-2).
+    Fallback: discover sitemap via _find_sitemap_url, parse as a flat file and
+    apply broad heuristics to identify category-like URLs (non-product, non-blog,
+    path depth 1-2).
     """
-    r = _get(f"{base_url}/sitemap.xml", timeout=10)
-    if not r or not _is_xml(r):
+    _, r, _ = _find_sitemap_url(base_url)
+    if not r:
         return None
 
     soup = BeautifulSoup(r.text, "lxml-xml")
@@ -264,8 +351,8 @@ def _detect_platform(base_url: str) -> str:
     if r and _is_xml(r):
         return "shoper"
 
-    # Check generator comment in /sitemap.xml
-    r = _get(f"{base_url}/sitemap.xml", timeout=8)
+    # Check generator comment in the sitemap (try all known locations)
+    _, r, _ = _find_sitemap_url(base_url)
     if r and _is_xml(r):
         text = r.text
         if "Yoast SEO" in text or "wordpress" in text.lower():
@@ -304,6 +391,7 @@ def discover_categories(base_url: str) -> list[str]:
     Auto-detects the e-commerce platform and discovers product category URLs.
     Supports WooCommerce, Shoper, PrestaShop, and a generic fallback.
     Returns a sorted list of deduplicated HTTPS URLs.
+    Raises ValueError with a descriptive message if no sitemap or categories found.
     """
     base_url = base_url.rstrip("/")
     platform = _detect_platform(base_url)
@@ -320,7 +408,14 @@ def discover_categories(base_url: str) -> list[str]:
         if result:
             return result
 
-    return []
+    # Collect everything that was checked to build a useful error message
+    _, _, checked = _find_sitemap_url(base_url)
+    checked_str = "\n  ".join(checked) if checked else "(brak)"
+    raise ValueError(
+        f"Nie znaleziono sitemaps ani kategorii dla: {base_url}\n"
+        f"Wykryta platforma: {platform}\n"
+        f"Sprawdzone adresy:\n  {checked_str}"
+    )
 
 
 def get_platform(base_url: str) -> str:
