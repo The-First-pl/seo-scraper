@@ -1,11 +1,22 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 
+{% block head %}
+<style>
+  .mode-btn { transition: all .15s; }
+  .mode-btn.active-mode {
+    background: var(--brand-blue) !important;
+    color: #fff !important;
+    border-color: var(--brand-blue) !important;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <h2 class="fw-bold mb-1" style="color:var(--brand-dark)">
   <i class="bi bi-speedometer2 me-2"></i>Konfiguracja audytu
 </h2>
-<p class="text-muted mb-4">Wybierz property GSC, podaj URL sklepu i wygeneruj audyt.</p>
+<p class="text-muted mb-4">Wybierz tryb, podaj URL strony i wygeneruj audyt SEO.</p>
 
 {% if gsc_error %}
 <div class="alert alert-warning d-flex align-items-start gap-2">
@@ -15,31 +26,64 @@
 {% endif %}
 
 <form action="/generate" method="post">
+  <input type="hidden" name="mode" id="mode-input" value="ecommerce">
 
-  <!-- URL sklepu -->
+  <!-- 1. Tryb audytu -->
   <div class="card mb-3">
     <div class="card-header-brand">
-      <h6 class="mb-0"><i class="bi bi-globe2 me-2"></i>1. URL sklepu</h6>
+      <h6 class="mb-0"><i class="bi bi-toggles me-2"></i>1. Tryb audytu</h6>
+    </div>
+    <div class="card-body p-4">
+      <div class="d-flex gap-3">
+        <button type="button" id="btn-ecommerce"
+                class="btn btn-lg flex-fill py-3 mode-btn active-mode"
+                onclick="setMode('ecommerce')">
+          🛒 Sklep e-commerce
+        </button>
+        <button type="button" id="btn-company"
+                class="btn btn-outline-secondary btn-lg flex-fill py-3 mode-btn"
+                onclick="setMode('company')">
+          🏢 Strona firmowa
+        </button>
+      </div>
+      <div class="form-text mt-2" id="mode-hint">
+        Audyt kategorii produktów — sitemap + GSC + Claude AI.
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. URL -->
+  <div class="card mb-3">
+    <div class="card-header-brand">
+      <h6 class="mb-0" id="url-label"><i class="bi bi-globe2 me-2"></i>2. URL sklepu</h6>
     </div>
     <div class="card-body p-4">
       <input
         type="url"
         name="shop_url"
+        id="shop-url-input"
         class="form-control form-control-lg"
-        placeholder="https://kawa-amann.pl"
+        placeholder="np. https://twoj-sklep.pl"
         value="{{ shop_url }}"
         required
       >
-      <div class="form-text">Skrypt znajdzie kategorie produktów przez sitemap.xml</div>
+      <div class="form-text" id="url-hint">Skrypt znajdzie kategorie produktów przez sitemap.xml</div>
     </div>
   </div>
 
-  <!-- GSC Property -->
+  <!-- 3. GSC Property -->
   <div class="card mb-3">
     <div class="card-header-brand">
-      <h6 class="mb-0"><i class="bi bi-search me-2"></i>2. Google Search Console — property</h6>
+      <h6 class="mb-0"><i class="bi bi-search me-2"></i>3. Google Search Console — property</h6>
     </div>
     <div class="card-body p-4">
+      <!-- company-mode notice (hidden by default) -->
+      <div id="gsc-optional-notice" class="alert alert-secondary mb-3" style="display:none">
+        <i class="bi bi-info-circle me-2"></i>
+        Brak danych GSC — analiza będzie oparta wyłącznie na scrapingu strony.
+        Zaznacz property poniżej, jeśli chcesz wzbogacić audyt o dane kliknięć.
+      </div>
+
       {% if properties %}
         <div class="list-group">
           {% for prop in properties %}
@@ -63,10 +107,10 @@
     </div>
   </div>
 
-  <!-- Anthropic API key -->
+  <!-- 4. Anthropic API key -->
   <div class="card mb-4">
     <div class="card-header-brand">
-      <h6 class="mb-0"><i class="bi bi-key me-2"></i>3. Klucz Anthropic API</h6>
+      <h6 class="mb-0"><i class="bi bi-key me-2"></i>4. Klucz Anthropic API</h6>
     </div>
     <div class="card-body p-4">
       {% if api_key_set %}
@@ -91,10 +135,65 @@
 
   <button
     type="submit"
+    id="submit-btn"
     class="btn btn-brand btn-lg w-100 py-3"
     {% if not properties %}disabled{% endif %}
   >
-    <i class="bi bi-play-circle-fill me-2"></i>Generuj audyt SEO
+    <i class="bi bi-play-circle-fill me-2" id="submit-icon"></i>
+    <span id="submit-text">Generuj audyt SEO</span>
   </button>
 </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const hasProperties = {{ 'true' if properties else 'false' }};
+
+function setMode(mode) {
+  document.getElementById('mode-input').value = mode;
+  const isCompany = mode === 'company';
+
+  // Toggle button styles
+  const btnE = document.getElementById('btn-ecommerce');
+  const btnC = document.getElementById('btn-company');
+  if (isCompany) {
+    btnE.className = 'btn btn-outline-secondary btn-lg flex-fill py-3 mode-btn';
+    btnC.className = 'btn btn-lg flex-fill py-3 mode-btn active-mode';
+  } else {
+    btnE.className = 'btn btn-lg flex-fill py-3 mode-btn active-mode';
+    btnC.className = 'btn btn-outline-secondary btn-lg flex-fill py-3 mode-btn';
+  }
+
+  // Mode hint
+  document.getElementById('mode-hint').textContent = isCompany
+    ? 'Audyt podstron firmowych — menu nawigacyjne + sitemap + Claude AI. GSC opcjonalne.'
+    : 'Audyt kategorii produktów — sitemap + GSC + Claude AI.';
+
+  // URL field
+  document.getElementById('url-label').innerHTML = isCompany
+    ? '<i class="bi bi-globe2 me-2"></i>2. URL strony firmowej'
+    : '<i class="bi bi-globe2 me-2"></i>2. URL sklepu';
+  document.getElementById('url-hint').textContent = isCompany
+    ? 'Skrypt znajdzie podstrony przez menu nawigacyjne i sitemap.xml'
+    : 'Skrypt znajdzie kategorie produktów przez sitemap.xml';
+  document.getElementById('shop-url-input').placeholder = isCompany
+    ? 'np. https://firma.pl'
+    : 'np. https://twoj-sklep.pl';
+
+  // GSC notice
+  document.getElementById('gsc-optional-notice').style.display = isCompany ? 'block' : 'none';
+
+  // Submit button — company mode doesn't require GSC
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = isCompany ? false : !hasProperties;
+
+  // Submit button label
+  document.getElementById('submit-text').textContent = isCompany
+    ? 'Generuj audyt firmowy'
+    : 'Generuj audyt SEO';
+  document.getElementById('submit-icon').className = isCompany
+    ? 'bi bi-building me-2'
+    : 'bi bi-play-circle-fill me-2';
+}
+</script>
 {% endblock %}

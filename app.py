@@ -16,6 +16,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from audit_runner import run_audit
 from gsc_client import list_properties
 from blog_planner import generate_blog_plan, export_excel, make_filename
+from company_audit_runner import run_company_audit
+from company_excel_writer import make_company_filename
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -152,19 +154,26 @@ def generate():
     shop_url = request.form.get("shop_url", "").strip()
     site_url = request.form.get("site_url", "").strip()
     api_key  = request.form.get("api_key", "").strip() or ANTHROPIC_API_KEY
+    mode     = request.form.get("mode", "ecommerce")
 
-    if not shop_url or not site_url:
-        session["gsc_error"] = "Wybierz property GSC i podaj URL sklepu."
+    if not shop_url:
+        session["gsc_error"] = "Podaj URL strony."
         return redirect(url_for("dashboard"))
 
     if not api_key:
         session["gsc_error"] = "Podaj klucz Anthropic API."
         return redirect(url_for("dashboard"))
 
-    task_id = uuid.uuid4().hex[:8]
-    creds_data = dict(session["credentials"])  # copy before thread starts
+    # For e-commerce mode, GSC property is required
+    if mode == "ecommerce" and not site_url:
+        session["gsc_error"] = "Wybierz property GSC."
+        return redirect(url_for("dashboard"))
+
+    task_id    = uuid.uuid4().hex[:8]
+    creds_data = dict(session["credentials"])
 
     _tasks[task_id] = {
+        "type":        mode,
         "status":      "running",
         "progress":    0,
         "message":     "Startowanie…",
@@ -179,15 +188,28 @@ def generate():
         _tasks[task_id]["message"]  = msg
         _tasks[task_id]["log"].append(msg)
 
-    def _worker():
-        try:
-            path = run_audit(shop_url, site_url, creds_data, api_key, _progress)
-            _tasks[task_id]["status"]      = "done"
-            _tasks[task_id]["result_path"] = path
-        except Exception as e:
-            _tasks[task_id]["status"] = "error"
-            _tasks[task_id]["error"]  = str(e)
-            _tasks[task_id]["log"].append(f"BŁĄD: {e}")
+    if mode == "company":
+        def _worker():
+            try:
+                path = run_company_audit(
+                    shop_url, site_url, creds_data, api_key, _progress
+                )
+                _tasks[task_id]["status"]      = "done"
+                _tasks[task_id]["result_path"] = path
+            except Exception as e:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["error"]  = str(e)
+                _tasks[task_id]["log"].append(f"BŁĄD: {e}")
+    else:
+        def _worker():
+            try:
+                path = run_audit(shop_url, site_url, creds_data, api_key, _progress)
+                _tasks[task_id]["status"]      = "done"
+                _tasks[task_id]["result_path"] = path
+            except Exception as e:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["error"]  = str(e)
+                _tasks[task_id]["log"].append(f"BŁĄD: {e}")
 
     threading.Thread(target=_worker, daemon=True).start()
     return redirect(url_for("status_page", task_id=task_id))
@@ -216,8 +238,12 @@ def download(task_id: str):
     if not task or task["status"] != "done" or not task.get("result_path"):
         return "Plik nie jest gotowy.", 404
 
-    domain = task["shop_url"].replace("https://", "").replace("http://", "").split("/")[0]
-    filename = f"seo_audit_{domain}.xlsx"
+    shop_url = task.get("shop_url", "")
+    if task.get("type") == "company":
+        filename = make_company_filename(shop_url)
+    else:
+        domain   = shop_url.replace("https://", "").replace("http://", "").split("/")[0]
+        filename = f"seo_audit_{domain}.xlsx"
 
     return send_file(
         task["result_path"],

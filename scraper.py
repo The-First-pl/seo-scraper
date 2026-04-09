@@ -440,3 +440,124 @@ def scrape_page_meta(url: str) -> dict:
     meta_description = desc_tag.get("content", "").strip() if desc_tag else ""
 
     return {"url": url, "h1": h1, "meta_title": meta_title, "meta_description": meta_description}
+
+
+# ── Company site discovery ────────────────────────────────────────────────────
+
+MAX_COMPANY_PAGES = 50
+
+_COMPANY_SKIP_RE = re.compile(
+    r"/(polityka[_-]prywatnosci|privacy[_-]policy|regulamin|terms|"
+    r"login|logowanie|koszyk|cart|checkout|sitemap|"
+    r"tag|author|autor|feed)(/|$)|"
+    r"[?&]s=",
+    re.IGNORECASE,
+)
+
+
+def discover_pages_company(base_url: str) -> list[str]:
+    """
+    Discovers company website pages for SEO audit via two strategies:
+      1. Internal links from <nav> / <header> / elements with menu/nav class
+      2. All URLs from sitemap (flat or index) not matching the skip pattern
+    Returns a deduplicated sorted list, max MAX_COMPANY_PAGES entries.
+    """
+    base_url   = base_url.rstrip("/")
+    base_https = base_url.replace("http://", "https://")
+    found: set[str] = set()
+
+    def _intern(href: str) -> str | None:
+        """Normalize href; return HTTPS URL if internal & not skipped, else None."""
+        href = href.strip()
+        if href.startswith("/"):
+            href = base_https + href
+        elif href.startswith("http"):
+            href = href.replace("http://", "https://")
+        else:
+            return None
+        href = href.rstrip("/")
+        if not href.startswith(base_https):
+            return None
+        path = href[len(base_https):]
+        if _COMPANY_SKIP_RE.search(path):
+            return None
+        return href
+
+    # Strategy 1: nav / header / menu links
+    r = _get(base_url, timeout=10)
+    if r:
+        soup = BeautifulSoup(r.text, "html.parser")
+        containers = (
+            soup.find_all("nav") +
+            soup.find_all("header") +
+            soup.find_all(class_=re.compile(r"\b(menu|nav)\b", re.IGNORECASE))
+        )
+        seen_ids: set[int] = set()
+        for el in containers:
+            eid = id(el)
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+            for a in el.find_all("a", href=True):
+                u = _intern(a["href"])
+                if u:
+                    found.add(u)
+
+    # Strategy 2: sitemap (flat or index)
+    _, r_sitemap, _ = _find_sitemap_url(base_url)
+    if r_sitemap:
+        sitemap_soup = BeautifulSoup(r_sitemap.text, "lxml-xml")
+        sub_sitemaps = sitemap_soup.find_all("sitemap")
+
+        def _add_from_xml(xml_text: str) -> None:
+            for raw in _extract_locs(xml_text):
+                u = _intern(raw)
+                if u:
+                    found.add(u)
+
+        if sub_sitemaps:
+            for sm in sub_sitemaps:
+                loc = sm.find("loc")
+                if not loc:
+                    continue
+                inner = _get(loc.text.strip(), timeout=10)
+                if inner:
+                    _add_from_xml(inner.text)
+        else:
+            _add_from_xml(r_sitemap.text)
+
+    return sorted(found)[:MAX_COMPANY_PAGES]
+
+
+def scrape_page_meta_company(url: str) -> dict:
+    """
+    Scrapes a company-site page: H1, first 3 H2s, meta title, meta description,
+    and whether the page contains a <form> element.
+    """
+    r = _get(url)
+    if not r:
+        return {
+            "url": url, "h1": "", "h2s": [],
+            "meta_title": "", "meta_description": "", "has_form": False,
+        }
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    h1_tag = soup.find("h1")
+    h1     = h1_tag.get_text(" ", strip=True) if h1_tag else ""
+
+    h2s = [tag.get_text(" ", strip=True) for tag in soup.find_all("h2")[:3]]
+
+    title_tag  = soup.find("title")
+    meta_title = title_tag.get_text(strip=True) if title_tag else ""
+
+    desc_tag         = soup.find("meta", attrs={"name": "description"})
+    meta_description = desc_tag.get("content", "").strip() if desc_tag else ""
+
+    has_form = bool(soup.find("form"))
+
+    return {
+        "url": url, "h1": h1, "h2s": h2s,
+        "meta_title": meta_title, "meta_description": meta_description,
+        "has_form": has_form,
+    }
