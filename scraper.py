@@ -88,7 +88,7 @@ def _find_sitemap_url(base_url: str) -> tuple[str | None, object | None, list[st
     return None, None, checked
 
 
-def _get(url: str, timeout: int = 15):
+def _get(url: str, timeout: int = 10):
     try:
         r = requests.get(url, headers=HTTP_HEADERS, timeout=timeout, allow_redirects=True)
         r.raise_for_status()
